@@ -1,0 +1,18 @@
+# PT backup directory
+.pt/
+
+# Added entries (9 items)
+target/
+tmp/
+temp/
+download/
+tmp*
+*.exe
+*.bak
+*sublime*
+src/tmp*
+
+# Added entries (3 items)
+bin/
+dist/
+build/
