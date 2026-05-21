@@ -2,19 +2,45 @@
 name = "download-list"
 version = "1.0.0"
 edition = "2021"
+description = "List, Get last, extract Last file if possible, with colors and emoji"
 authors = ["Hadi Cahyadi <cumulus13@gmail.com>"]
 license = "MIT"
-
-[[bin]]
-name = "dwn"
-path = "src/main.rs"
+homepage = "https://github.com/cumulus13/download-list"
+repository = "https://github.com/cumulus13/download-list"
+keywords = ["download", "manager", "archive", "extract", "files"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
-clap = { version = "=4.4.18", features = ["derive", "color"] }
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+colored = "2"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "cargo"] }
+indicatif = "0.17"
+console = "0.15"
+dirs = "5"
+zip = "0.6"
 tar = "0.4"
 flate2 = "1"
+unrar = "0.5"
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+tempfile = "3"
+glob = "0.3"
+log = "0.4"
+env_logger = "0.11"
 bzip2 = "0.4"
 xz2 = "0.1"
 terminal_size = "0.3"
 unicode-width = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "dwn"
+path = "src/main.rs"
