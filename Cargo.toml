@@ -1,6 +1,6 @@
 [package]
 name = "download-list"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "List, Get last, extract Last file if possible, with colors and emoji"
 authors = ["Hadi Cahyadi <cumulus13@gmail.com>"]
