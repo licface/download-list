@@ -1,6 +1,6 @@
 [package]
 name = "download-list"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "List, Get last, extract Last file if possible, with colors and emoji"
 authors = ["Hadi Cahyadi <cumulus13@gmail.com>"]
@@ -11,25 +11,16 @@ keywords = ["download", "manager", "archive", "extract", "files"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
-colored = "2"
-chrono = "0.4"
+# Only crates actually used by src/main.rs are listed here. The `.7z` and
+# `.rar` formats are handled by shelling out to the `7z` / `unrar` CLI tools
+# at runtime (see README), so no Rust crate is needed for them — in
+# particular the old `unrar` crate dependency was unused dead weight and,
+# since it links against the unrar C++ sources at build time, a real risk of
+# build failure on machines without a C++ toolchain. It has been removed.
 clap = { version = "4", features = ["derive", "cargo"] }
-indicatif = "0.17"
-console = "0.15"
-dirs = "5"
 zip = "0.6"
 tar = "0.4"
 flate2 = "1"
-unrar = "0.5"
-anyhow = "1"
-thiserror = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-regex = "1"
-tempfile = "3"
-glob = "0.3"
-log = "0.4"
-env_logger = "0.11"
 bzip2 = "0.4"
 xz2 = "0.1"
 terminal_size = "0.3"

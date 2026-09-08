@@ -1,21 +1,28 @@
-# PT backup directory
+*.pyc
+*.bak
+*.zip
+*.rar
+*.7z
+*.mp3
+*.wav
+*.sublime-workspace
+.hg/
+build/
+*.hgignore
+*.hgtags
+*dist/
+*.egg-info/
+traceback.log
+__pycache__/
+*.log
+target/
 .pt/
 
-# Added entries (9 items)
-target/
-tmp/
-temp/
-download/
-tmp*
-*.exe
-*.bak
-*sublime*
-src/tmp*
-
-# Added entries (3 items)
-bin/
-dist/
-build/
+# Added entries (1 items)
+*.sublime-project
 
 # Added entries (1 items)
-*target/
+src/tmp*
+
+# Added entries (1 items)
+CLAUDE.md

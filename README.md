@@ -50,6 +50,9 @@ sudo cp target/release/dwn /usr/local/bin/
 | `terminal_size` | Terminal width    |
 | `unicode-width` | Display alignment |
 
+`.7z` and `.rar` are handled by shelling out to the `7z` / `unrar` binaries
+at runtime — no Rust crate is required for them, and none is bundled.
+
 ---
 
 ## Usage
@@ -88,6 +91,7 @@ dwn list --last               # Show only the newest file
 dwn list --pattern "*.zip"    # Show only ZIP files
 dwn list -z                   # Inspect the newest archive
 dwn list -z -f myfile.tar.gz  # Inspect a specific archive
+dwn list -z -p "*.png"        # Inspect contents, filtered to *.png entries
 ```
 
 ---
@@ -101,8 +105,15 @@ Options:
   -f, --file <FILE>     Archive to extract (default: newest archive)
   -o, --output <DIR>    Output directory (default: current dir)
   -w, --overwrite       Overwrite all existing files without asking
+  -p, --pattern <PAT>   Only extract entries matching this glob (default: *)
   -v, --verbose         Show per-file progress and timestamps
 ```
+
+`--pattern` matches against both the entry's full path inside the archive
+and its basename, so both `-p "*.png"` and `-p "assets/*"` work as expected.
+It supports `*` and `?` wildcards, same as `list --pattern`. Conflict
+detection (existing vs. new files) and the interactive overwrite prompt are
+both computed only over the entries that match the pattern.
 
 **Smart conflict logic:**
 
@@ -120,6 +131,8 @@ dwn extract -f archive.zip           # Extract specific file
 dwn extract -f archive.zip -o ~/out  # Extract to ~/out
 dwn extract --overwrite              # Force overwrite everything
 dwn extract --verbose                # Show timestamped per-file log
+dwn extract -p "*.pdf"               # Extract only PDF entries
+dwn extract -p "images/*" -o ~/pics  # Extract only the images/ folder
 ```
 
 ---
@@ -186,6 +199,40 @@ All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallb
 
 ---
 
+## Changelog
+
+### v1.1.1
+
+- **Fixed:** `extract` had no way to select which files to pull out of an
+  archive — the underlying plumbing existed (an unused parameter) but was
+  never wired up. Added a real `-p/--pattern` glob filter, applied
+  consistently to conflict detection, the extraction itself, and the
+  ZIP/TAR/7z/RAR backends.
+- **Fixed:** `list -z --pattern` silently ignored the pattern when combined
+  with `-z`; archive-content filtering now works.
+- **Fixed:** a "zip-slip" path-traversal issue — a crafted `.zip`/`.tar*`
+  archive containing entries like `../../etc/passwd` could previously write
+  outside the requested output directory. Entry paths are now sanitised
+  before any file is written, and unsafe entries are skipped with a warning.
+- **Fixed:** removed the unused `unrar` crate dependency (the tool already
+  shells out to the `unrar` binary; the crate wasn't referenced anywhere in
+  the code, and its C++ build step was a needless source of build failures)
+  along with over a dozen other dependencies declared in `Cargo.toml` but
+  never used (`colored`, `chrono`, `indicatif`, `console`, `dirs`, `anyhow`,
+  `thiserror`, `serde`, `serde_json`, `regex`, `tempfile`, `glob`, `log`,
+  `env_logger`). Build times should be noticeably faster.
+
 ## License
 
 MIT © Hadi Cahyadi
+
+## 👤 Author
+        
+[Hadi Cahyadi](mailto:cumulus13@gmail.com)
+    
+
+[![Buy Me a Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/cumulus13)
+
+[![Donate via Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/cumulus13)
+ 
+[Support me on Patreon](https://www.patreon.com/cumulus13)

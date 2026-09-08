@@ -69,6 +69,7 @@ const E_DOC:      &str = "📋";
       dwn list -z -f foo.7z       Inspect a specific archive\n  \
       dwn extract                 Extract the newest archive\n  \
       dwn extract -f foo.zip      Extract a specific archive\n  \
+      dwn extract -p \"*.txt\"      Extract only files matching a pattern\n  \
       dwn extract --overwrite     Overwrite all existing files\n  \
       dwn extract --verbose       Show per-file details\n  \
       dwn path                    Print the Downloads directory path",
@@ -113,6 +114,9 @@ enum Commands {
         /// Overwrite all existing files without asking
         #[arg(short = 'w', long)]
         overwrite: bool,
+        /// Only extract entries matching this glob (e.g. "*.txt", "docs/*")
+        #[arg(short, long, default_value = "*")]
+        pattern: String,
         #[arg(short, long)]
         verbose: bool,
     },
@@ -454,14 +458,19 @@ fn cmd_list(last: bool, pattern: &str, asc: bool) {
     println!("  {} files  •  total {}", color::cyan(&files.len().to_string()), color::orange(&format_size(total_size)));
 }
 
-fn cmd_list_archive(file: Option<PathBuf>, verbose: bool) {
+fn cmd_list_archive(file: Option<PathBuf>, pattern: &str, verbose: bool) {
     let path = match resolve_archive(file, verbose) { Some(p)=>p, None=>process::exit(1) };
     vlog(verbose, "INFO", &format!("{E_SEARCH} Inspecting: {}", path.display()));
 
-    let entries = match read_archive_entries(&path) {
+    let all_entries = match read_archive_entries(&path) {
         Ok(e) => e,
         Err(e) => { eprintln!("{E_ERROR} {}", color::red(&format!("Cannot read archive: {e}"))); process::exit(1); }
     };
+    let entries: Vec<ArchiveEntry> = all_entries.into_iter().filter(|e| entry_matches(pattern, &e.name)).collect();
+    if entries.is_empty() {
+        eprintln!("{E_WARNING} {}", color::yellow(&format!("No entries match pattern '{pattern}'")));
+        process::exit(1);
+    }
 
     let total_size: u64 = entries.iter().map(|e| e.size).sum();
     println!();
@@ -490,7 +499,7 @@ fn cmd_list_archive(file: Option<PathBuf>, verbose: bool) {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode { OverwriteAll, AllNew, OnlyNew, AllExist }
 
-fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, verbose: bool) {
+fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, pattern: &str, verbose: bool) {
     let path = match resolve_archive(file, verbose) { Some(p)=>p, None=>process::exit(1) };
 
     let file_size = match fs::metadata(&path) {
@@ -508,15 +517,28 @@ fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, verbose:
     }
 
     vlog(verbose, "INFO", "Analysing archive contents…");
-    let entries = match read_archive_entries(&path) {
+    let all_entries = match read_archive_entries(&path) {
         Ok(e) => e,
         Err(e) => { eprintln!("{E_ERROR} {}", color::red(&e)); process::exit(1); }
     };
-    if entries.is_empty() { eprintln!("{E_WARNING} {}", color::yellow("Archive is empty")); process::exit(1); }
+    if all_entries.is_empty() { eprintln!("{E_WARNING} {}", color::yellow("Archive is empty")); process::exit(1); }
+    let total_entries = all_entries.len();
+
+    // Apply the entry-name filter (if any) before doing anything else, so
+    // counts, conflict detection, and the extraction itself all agree.
+    let entries: Vec<ArchiveEntry> = all_entries.into_iter().filter(|e| entry_matches(pattern, &e.name)).collect();
+    if entries.is_empty() {
+        eprintln!("{E_WARNING} {}", color::yellow(&format!("No entries match pattern '{pattern}'")));
+        process::exit(1);
+    }
+    if pattern != "*" && !pattern.is_empty() {
+        vlog(verbose, "INFO", &format!("Pattern '{pattern}' matched {} of {} entries", entries.len(), total_entries));
+    }
 
     vlog(verbose, "INFO", &format!("{} files  ({})", entries.len(), format_size(entries.iter().map(|e|e.size).sum::<u64>())));
 
-    let (existing, new_files): (Vec<_>, Vec<_>) = entries.iter().partition(|e| output.join(&e.name).exists());
+    let (existing, new_files): (Vec<&ArchiveEntry>, Vec<&ArchiveEntry>) = entries.iter()
+        .partition(|e| safe_join(&output, &e.name).map(|d| d.exists()).unwrap_or(true));
 
     if verbose {
         if !existing.is_empty() {
@@ -537,7 +559,7 @@ fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, verbose:
     else { Mode::AllExist };
 
     if mode == Mode::AllExist {
-        let msg = format!("All {} files already exist. Use --overwrite to re-extract.", entries.len());
+        let msg = format!("All {} matching files already exist. Use --overwrite to re-extract.", entries.len());
         println!("{E_INFO} {}", color::yellow(&msg));
         if is_tty() && !overwrite {
             print!("{E_WARNING} Overwrite all? [y/N] ");
@@ -545,17 +567,16 @@ fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, verbose:
             let mut r = String::new();
             io::stdin().read_line(&mut r).ok();
             if matches!(r.trim().to_lowercase().as_str(),"y"|"yes") {
-                do_extract(&path, &output, Mode::OverwriteAll, &new_files.iter().map(|e|e.name.clone()).collect::<Vec<_>>(), existing.len(), verbose);
+                do_extract(&path, &output, Mode::OverwriteAll, pattern, existing.len(), verbose);
             }
         }
         return;
     }
 
-    let new_names: Vec<String> = new_files.iter().map(|e| e.name.clone()).collect();
-    do_extract(&path, &output, mode, &new_names, existing.len(), verbose);
+    do_extract(&path, &output, mode, pattern, existing.len(), verbose);
 }
 
-fn do_extract(path: &Path, output: &Path, mode: Mode, new_files: &[String], existing_count: usize, verbose: bool) {
+fn do_extract(path: &Path, output: &Path, mode: Mode, pattern: &str, existing_count: usize, verbose: bool) {
     let fname = path.file_name().unwrap_or_default().to_string_lossy();
     let verb = match mode {
         Mode::OverwriteAll => "Overwriting",
@@ -563,9 +584,13 @@ fn do_extract(path: &Path, output: &Path, mode: Mode, new_files: &[String], exis
         Mode::OnlyNew      => "Extracting new files from",
         Mode::AllExist     => return,
     };
-    println!("{E_EXTRACT} {} {}", color::cyan(verb), color::yellow(&fname));
+    if pattern != "*" && !pattern.is_empty() {
+        println!("{E_EXTRACT} {} {} {}", color::cyan(verb), color::yellow(&fname), color::gray(&format!("(pattern: {pattern})")));
+    } else {
+        println!("{E_EXTRACT} {} {}", color::cyan(verb), color::yellow(&fname));
+    }
 
-    match extract_archive(path, output, mode, new_files, verbose) {
+    match extract_archive(path, output, mode, pattern, verbose) {
         Ok(count) => {
             let msg = match mode {
                 Mode::OverwriteAll => format!("Overwrote {count} files from {fname}"),
@@ -583,6 +608,37 @@ fn do_extract(path: &Path, output: &Path, mode: Mode, new_files: &[String], exis
 // ── Archive entry struct ──────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 struct ArchiveEntry { name: String, size: u64, compressed: u64 }
+
+/// Does an archive entry name match a user-supplied glob pattern?
+/// Matches against the full (normalised) path as well as the basename, so
+/// both `-p "*.txt"` and `-p "docs/*"` behave the way people expect.
+fn entry_matches(pattern: &str, name: &str) -> bool {
+    if pattern.is_empty() || pattern == "*" { return true; }
+    let norm = name.replace('\\', "/");
+    if glob_match(pattern, &norm) { return true; }
+    let base = norm.rsplit('/').next().unwrap_or(&norm);
+    glob_match(pattern, base)
+}
+
+/// Safely join an archive entry name onto the output directory, rejecting
+/// absolute paths and `..` components ("zip-slip") that would otherwise let
+/// a crafted archive write outside the extraction target.
+fn safe_join(output: &Path, name: &str) -> Option<PathBuf> {
+    let norm = name.replace('\\', "/");
+    let mut result = output.to_path_buf();
+    let mut any = false;
+    for comp in Path::new(&norm).components() {
+        match comp {
+            std::path::Component::Normal(c) => { result.push(c); any = true; }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return None;
+            }
+        }
+    }
+    if !any { return None; }
+    Some(result)
+}
 
 // ── Archive reading ───────────────────────────────────────────────────────────
 fn read_archive_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
@@ -702,37 +758,42 @@ fn should_write(dest: &Path, mode: Mode) -> bool {
     }
 }
 
-fn extract_archive(path: &Path, output: &Path, mode: Mode, _new: &[String], verbose: bool) -> Result<usize, String> {
+fn extract_archive(path: &Path, output: &Path, mode: Mode, pattern: &str, verbose: bool) -> Result<usize, String> {
     let n = path.file_name().and_then(|n|n.to_str()).unwrap_or("").to_lowercase();
-    if n.ends_with(".zip")                               { extract_zip(path, output, mode, verbose) }
-    else if n.ends_with(".tar.gz")||n.ends_with(".tgz")  { extract_tar(path, output, mode, 'z', verbose) }
-    else if n.ends_with(".tar.bz2")||n.ends_with(".tbz2"){ extract_tar(path, output, mode, 'j', verbose) }
-    else if n.ends_with(".tar.xz")||n.ends_with(".txz")  { extract_tar(path, output, mode, 'J', verbose) }
-    else if n.ends_with(".tar")                          { extract_tar(path, output, mode, ' ', verbose) }
-    else if n.ends_with(".7z")                           { extract_7z(path, output, mode, verbose) }
-    else if n.ends_with(".rar")                          { extract_rar(path, output, mode) }
+    if n.ends_with(".zip")                               { extract_zip(path, output, mode, pattern, verbose) }
+    else if n.ends_with(".tar.gz")||n.ends_with(".tgz")  { extract_tar(path, output, mode, 'z', pattern, verbose) }
+    else if n.ends_with(".tar.bz2")||n.ends_with(".tbz2"){ extract_tar(path, output, mode, 'j', pattern, verbose) }
+    else if n.ends_with(".tar.xz")||n.ends_with(".txz")  { extract_tar(path, output, mode, 'J', pattern, verbose) }
+    else if n.ends_with(".tar")                          { extract_tar(path, output, mode, ' ', pattern, verbose) }
+    else if n.ends_with(".7z")                           { extract_7z(path, output, mode, pattern, verbose) }
+    else if n.ends_with(".rar")                          { extract_rar(path, output, mode, pattern) }
     else { Err(format!("Unsupported: {}", path.display())) }
 }
 
-fn extract_zip(path: &Path, output: &Path, mode: Mode, verbose: bool) -> Result<usize, String> {
+fn extract_zip(path: &Path, output: &Path, mode: Mode, pattern: &str, verbose: bool) -> Result<usize, String> {
     let f = fs::File::open(path).map_err(|e|e.to_string())?;
     let mut z = zip::ZipArchive::new(f).map_err(|e|e.to_string())?;
     let mut count = 0;
     for i in 0..z.len() {
         let mut file = z.by_index(i).map_err(|e|e.to_string())?;
         if file.is_dir() { continue; }
-        let dest = output.join(file.name());
-        if !should_write(&dest, mode) { vlog(verbose,"DEBUG",&format!("{E_SKIP} {}",file.name())); continue; }
+        let name = file.name().to_string();
+        if !entry_matches(pattern, &name) { continue; }
+        let dest = match safe_join(output, &name) {
+            Some(d) => d,
+            None => { eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping unsafe path in archive: {name}"))); continue; }
+        };
+        if !should_write(&dest, mode) { vlog(verbose,"DEBUG",&format!("{E_SKIP} {name}")); continue; }
         if let Some(p) = dest.parent() { fs::create_dir_all(p).map_err(|e|e.to_string())?; }
         let mut out = fs::File::create(&dest).map_err(|e|e.to_string())?;
         io::copy(&mut file, &mut out).map_err(|e|e.to_string())?;
-        vlog(verbose,"DEBUG",&format!("{E_NEW} {}",file.name()));
+        vlog(verbose,"DEBUG",&format!("{E_NEW} {name}"));
         count += 1;
     }
     Ok(count)
 }
 
-fn extract_tar(path: &Path, output: &Path, mode: Mode, comp: char, verbose: bool) -> Result<usize, String> {
+fn extract_tar(path: &Path, output: &Path, mode: Mode, comp: char, pattern: &str, verbose: bool) -> Result<usize, String> {
     let f = fs::File::open(path).map_err(|e|e.to_string())?;
     let mut count = 0usize;
     macro_rules! do_extract {
@@ -742,7 +803,11 @@ fn extract_tar(path: &Path, output: &Path, mode: Mode, comp: char, verbose: bool
                 let mut entry = entry.map_err(|e|e.to_string())?;
                 if !entry.header().entry_type().is_file() { continue; }
                 let name = entry.path().map_err(|e|e.to_string())?.to_string_lossy().into_owned();
-                let dest = output.join(&name);
+                if !entry_matches(pattern, &name) { continue; }
+                let dest = match safe_join(output, &name) {
+                    Some(d) => d,
+                    None => { eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping unsafe path in archive: {name}"))); continue; }
+                };
                 if !should_write(&dest, mode) { vlog(verbose,"DEBUG",&format!("{E_SKIP} {name}")); continue; }
                 if let Some(p) = dest.parent() { fs::create_dir_all(p).map_err(|e|e.to_string())?; }
                 let mut buf = Vec::new();
@@ -762,36 +827,59 @@ fn extract_tar(path: &Path, output: &Path, mode: Mode, comp: char, verbose: bool
     Ok(count)
 }
 
-fn extract_7z(path: &Path, output: &Path, mode: Mode, _verbose: bool) -> Result<usize, String> {
+fn extract_7z(path: &Path, output: &Path, mode: Mode, pattern: &str, _verbose: bool) -> Result<usize, String> {
     let flag = match mode {
         Mode::OverwriteAll => "-aoa",
         Mode::OnlyNew      => "-aos",
         _                  => "-aos",
     };
     let out_arg = format!("-o{}", output.display());
+    let mut args: Vec<String> = vec!["x".into(), "-y".into(), flag.into(), out_arg, path.display().to_string()];
+    if pattern != "*" && !pattern.is_empty() {
+        // Recurse into subdirectories so the mask also matches nested files.
+        args.push("-r".into());
+        args.push(pattern.to_string());
+    }
     let res = process::Command::new("7z")
-        .args(["x", "-y", flag, &out_arg, &path.display().to_string()])
+        .args(&args)
         .output()
         .map_err(|_| "7z not found — install p7zip to extract .7z files".to_string())?;
     if res.status.success() {
         let text = String::from_utf8_lossy(&res.stdout);
         // Count "Extracting" lines in 7z output
         let count = text.lines().filter(|l| l.trim_start().starts_with("Extracting")).count();
+        if count == 0 && pattern != "*" && !pattern.is_empty() {
+            return Err(format!("No entries matched pattern '{pattern}'"));
+        }
         Ok(count.max(1))
     } else {
         Err(String::from_utf8_lossy(&res.stderr).to_string())
     }
 }
 
-fn extract_rar(path: &Path, output: &Path, mode: Mode) -> Result<usize, String> {
+fn extract_rar(path: &Path, output: &Path, mode: Mode, pattern: &str) -> Result<usize, String> {
     let flag = match mode { Mode::OverwriteAll => "-o+", _ => "-o-" };
+    let mut args: Vec<String> = vec!["x".into(), "-y".into(), flag.into()];
+    if pattern != "*" && !pattern.is_empty() {
+        // Recurse into subdirectories so the mask also matches nested files.
+        args.push("-r".into());
+    }
+    args.push(path.display().to_string());
+    if pattern != "*" && !pattern.is_empty() {
+        args.push(pattern.to_string());
+    }
+    args.push(output.display().to_string());
     let res = process::Command::new("unrar")
-        .args(["x","-y",flag,&path.display().to_string(),&output.display().to_string()])
+        .args(&args)
         .output()
         .map_err(|_| "unrar not found — install `unrar` to extract .rar files".to_string())?;
     if res.status.success() {
         let text = String::from_utf8_lossy(&res.stdout);
-        Ok(text.lines().filter(|l| l.contains("Extracting")).count())
+        let count = text.lines().filter(|l| l.contains("Extracting")).count();
+        if count == 0 && pattern != "*" && !pattern.is_empty() {
+            return Err(format!("No entries matched pattern '{pattern}'"));
+        }
+        Ok(count)
     } else {
         Err(String::from_utf8_lossy(&res.stderr).to_string())
     }
@@ -846,11 +934,11 @@ fn main() {
     match cli.command {
         Commands::Path => cmd_path(),
         Commands::List { last, pattern, list_archive, file, verbose, asc, desc: _ } => {
-            if list_archive { cmd_list_archive(file, verbose); }
+            if list_archive { cmd_list_archive(file, &pattern, verbose); }
             else { cmd_list(last, &pattern, asc); }
         }
-        Commands::Extract { file, output, overwrite, verbose } => {
-            cmd_extract(file, output, overwrite, verbose);
+        Commands::Extract { file, output, overwrite, pattern, verbose } => {
+            cmd_extract(file, output, overwrite, &pattern, verbose);
         }
     }
 }
