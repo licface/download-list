@@ -215,6 +215,36 @@ All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallb
 
 ## Changelog
 
+### v1.0.5
+
+Full self-audit of every command after two rounds of bugs slipping through
+one at a time — these four did not need a bug report to find:
+
+- **Fixed:** `is_tty()` was hard-coded to `false` on Windows, so the
+  interactive "overwrite existing files? [y/N]" prompt in `extract` could
+  never appear on Windows even in a real terminal — it silently did nothing.
+  Now uses the C runtime's `_isatty` on Windows, same approach `isatty` uses
+  on Unix.
+- **Fixed:** `list -z` could panic on archive entries with non-ASCII names
+  over 64 characters — the long-name truncation sliced by raw byte offset,
+  which can land mid-character on multi-byte UTF-8 and crash. Now truncates
+  by character count.
+- **Fixed:** `.7z` archives — `list -z`, and `extract`'s conflict detection
+  and `-p` pattern filter — only ever saw the *last* file in the archive,
+  plus a bogus extra "entry" for the archive itself. `7z l -slt` output has
+  exactly one `----------` separator in total (between the archive header
+  and the file list), not one per file; the parser treated every occurrence
+  as an entry boundary, so it never advanced past entry #1 in the header and
+  entry #2 at EOF. Rewritten to skip the single header separator and then
+  read the actual blank-line-delimited per-file blocks.
+- **Fixed:** `.rar` archives — `unrar l`'s columns are `Attributes Size Date
+  Time Name`, with Date and Time as two separate tokens. The parser started
+  the filename at the Time column instead of Name, so every parsed name came
+  out prefixed with a bogus time (`"12:00 realfile.txt"`). This silently
+  broke `-p` pattern filtering and existing/new detection for `.rar` files
+  (actual extraction via the real `unrar` binary was unaffected, since it
+  doesn't go through this parser).
+
 ### v1.0.3
 
 - **Fixed:** `--pattern` (on `list`, `list -z`, and `extract`) demanded an
@@ -228,7 +258,7 @@ All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallb
   matching the flag's own description, which already said "this is the
   default" while the code did the opposite). Pass `--desc` for newest-first.
 
-### v1.1.0
+### v1.0.2
 
 - **Fixed:** `extract` had no way to select which files to pull out of an
   archive — the underlying plumbing existed (an unused parameter) but was

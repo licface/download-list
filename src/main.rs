@@ -440,10 +440,12 @@ fn cmd_list(last: bool, pattern: &str, asc: bool) {
     let mut files = list_downloads(pattern);
     if files.is_empty() { println!("{E_INFO} {}", color::yellow("No files found")); return; }
 
-    // list_downloads returns newest-first; reverse for asc
-    if asc { files.reverse(); }
-
+    // list_downloads returns newest-first. `--last` always means "the single
+    // newest matching file", regardless of display sort order — so select it
+    // here, before any reversal for --asc, not after.
     if last { files.truncate(1); }
+
+    if asc { files.reverse(); }
 
     let sort_indicator = if asc {
         format!("  {}", color::teal("↑ oldest first"))
@@ -501,7 +503,15 @@ fn cmd_list_archive(file: Option<PathBuf>, pattern: &str, verbose: bool) {
 
     for (i, e) in entries.iter().enumerate() {
         let lbl = type_label(&e.name);
-        let display = if e.name.len() > 64 { format!("…{}", &e.name[e.name.len()-63..]) } else { e.name.clone() };
+        // Truncate by character count, not byte offset — slicing raw bytes
+        // can land mid-character on multi-byte UTF-8 names and panic.
+        let display = if e.name.chars().count() > 64 {
+            let total = e.name.chars().count();
+            let tail: String = e.name.chars().skip(total.saturating_sub(63)).collect();
+            format!("…{tail}")
+        } else {
+            e.name.clone()
+        };
         rows.push(vec![
             color::gray(&(i+1).to_string()),
             type_emoji(lbl).to_string(),
@@ -718,19 +728,33 @@ fn read_7z(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
     let text = String::from_utf8_lossy(&out.stdout);
+
+    // `-slt` output has exactly ONE "----------" separator in the whole
+    // output — between the archive-level header block and the per-file
+    // blocks — not one per file. Per-file blocks are delimited by blank
+    // lines instead. Skip past that single separator, then parse
+    // blank-line-delimited blocks for the actual entries.
+    let body = match text.split_once("----------") {
+        Some((_, rest)) => rest,
+        None => return Ok(Vec::new()),
+    };
+
     let mut entries = Vec::new();
-    let mut cur_name = String::new();
+    let mut cur_name: Option<String> = None;
     let mut cur_size = 0u64;
     let mut cur_csize = 0u64;
     let mut is_dir = false;
-    for line in text.lines() {
-        if line.starts_with("----------") {
-            if !cur_name.is_empty() && !is_dir {
-                entries.push(ArchiveEntry { name: cur_name.clone(), size: cur_size, compressed: cur_csize });
+
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            if let Some(name) = cur_name.take() {
+                if !is_dir { entries.push(ArchiveEntry { name, size: cur_size, compressed: cur_csize }); }
             }
-            cur_name.clear(); cur_size = 0; cur_csize = 0; is_dir = false;
-        } else if let Some(v) = line.strip_prefix("Path = ") {
-            cur_name = v.to_string();
+            cur_size = 0; cur_csize = 0; is_dir = false;
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("Path = ") {
+            cur_name = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Size = ") {
             cur_size = v.trim().parse().unwrap_or(0);
         } else if let Some(v) = line.strip_prefix("Packed Size = ") {
@@ -739,8 +763,8 @@ fn read_7z(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
             is_dir = v.contains('D');
         }
     }
-    if !cur_name.is_empty() && !is_dir {
-        entries.push(ArchiveEntry { name: cur_name, size: cur_size, compressed: cur_csize });
+    if let Some(name) = cur_name.take() {
+        if !is_dir { entries.push(ArchiveEntry { name, size: cur_size, compressed: cur_csize }); }
     }
     Ok(entries)
 }
@@ -758,9 +782,12 @@ fn read_rar(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
         if line.starts_with("---") { in_sec = !in_sec; continue; }
         if !in_sec || line.trim().is_empty() { continue; }
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 4 {
+        // Columns are: Attributes  Size  Date  Time  Name — Date and Time
+        // are two separate whitespace-separated tokens, so the name starts
+        // at index 4, not 3 (which is just the Time column).
+        if parts.len() >= 5 {
             if let Ok(size) = parts[1].replace(',', "").parse::<u64>() {
-                let name = parts[3..].join(" ");
+                let name = parts[4..].join(" ");
                 if !name.ends_with('/') { entries.push(ArchiveEntry { name, size, compressed:0 }); }
             }
         }
@@ -943,7 +970,9 @@ fn vlog(verbose: bool, level: &str, msg: &str) {
 fn is_tty() -> bool {
     #[cfg(unix)]
     { extern "C" { fn isatty(fd: i32) -> i32; } unsafe { isatty(0) != 0 } }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    { extern "C" { fn _isatty(fd: i32) -> i32; } unsafe { _isatty(0) != 0 } }
+    #[cfg(not(any(unix, windows)))]
     { false }
 }
 
