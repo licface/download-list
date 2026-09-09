@@ -236,6 +236,21 @@ All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallb
 
 ## Changelog
 
+### v1.0.7
+
+- **Fixed (critical):** `extract -p PATTERN` without `-f`, when the pattern
+  matched an archive's *filename* but nothing inside it, correctly listed
+  and counted "extracting all N entries" — then extracted **zero files**.
+  The v1.4.0 archive-selection fallback (above) only updated the `entries`
+  list used for display/counting; it never told `extract_zip`/`extract_tar`/
+  `extract_7z`/`extract_rar` to stop re-applying the original pattern as a
+  second, independent content filter. Those functions don't see `entries` —
+  they take the pattern string and filter the archive again themselves, so
+  `-p vmmon` (matched by filename) still filtered every internal file by
+  "contains vmmon" and matched none of them. Fixed by forwarding `"*"` to
+  the actual extraction step whenever the fallback was used, instead of the
+  original pattern.
+
 ### v1.0.6
 
 - **Fixed:** `list -z -p PATTERN` (and `extract -p PATTERN`) without `-f`

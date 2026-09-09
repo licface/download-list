@@ -575,7 +575,9 @@ fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, pattern:
     // If the pattern already did its job picking *which archive* to open
     // (no -f given), don't also demand it match something *inside* that
     // archive before extracting anything — extract everything from it.
+    let mut used_fallback = false;
     let entries: Vec<ArchiveEntry> = if filtered.is_empty() && matched_by_name {
+        used_fallback = true;
         vlog(verbose, "INFO", &format!("Pattern '{pattern}' matched the archive itself; extracting all {} entries", all_entries.len()));
         all_entries
     } else {
@@ -585,9 +587,17 @@ fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, pattern:
         eprintln!("{E_WARNING} {}", color::yellow(&format!("No entries match pattern '{pattern}'")));
         process::exit(1);
     }
-    if pattern != "*" && !pattern.is_empty() {
+    if pattern != "*" && !pattern.is_empty() && !used_fallback {
         vlog(verbose, "INFO", &format!("Pattern '{pattern}' matched {} of {} entries", entries.len(), total_entries));
     }
+    // The actual extraction (extract_zip/tar/7z/rar) independently re-applies
+    // this pattern per-entry — it doesn't know about the archive-selection
+    // fallback above. If we fell back to "extract the whole archive", the
+    // pattern must NOT be forwarded as a content filter too, or every entry
+    // gets filtered out again down there (e.g. pattern "vmmon" matching the
+    // archive's filename but none of its internal file names) and nothing
+    // gets extracted despite `entries` correctly listing everything.
+    let extract_pattern: &str = if used_fallback { "*" } else { pattern };
 
     vlog(verbose, "INFO", &format!("{} files  ({})", entries.len(), format_size(entries.iter().map(|e|e.size).sum::<u64>())));
 
@@ -621,13 +631,13 @@ fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, pattern:
             let mut r = String::new();
             io::stdin().read_line(&mut r).ok();
             if matches!(r.trim().to_lowercase().as_str(),"y"|"yes") {
-                do_extract(&path, &output, Mode::OverwriteAll, pattern, existing.len(), verbose);
+                do_extract(&path, &output, Mode::OverwriteAll, extract_pattern, existing.len(), verbose);
             }
         }
         return;
     }
 
-    do_extract(&path, &output, mode, pattern, existing.len(), verbose);
+    do_extract(&path, &output, mode, extract_pattern, existing.len(), verbose);
 }
 
 fn do_extract(path: &Path, output: &Path, mode: Mode, pattern: &str, existing_count: usize, verbose: bool) {
