@@ -36,14 +36,14 @@ jobs:
       - name: Run formatting
         run: cargo fmt --all
         continue-on-error: true # formatting isn't enforced yet, just reported
-      
+
       - name: Check formatting
         run: cargo fmt --all -- --check
         continue-on-error: true # formatting isn't enforced yet, just reported
 
       - name: Clippy Fix
         run: cargo clippy --fix --all-targets --allow-dirty --all-features
-      
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 

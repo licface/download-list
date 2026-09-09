@@ -188,7 +188,7 @@ fn list_downloads(pattern: &str) -> Vec<FileEntry> {
             }
         }
     }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.sort_by_key(|a| std::cmp::Reverse(a.modified));
     out
 }
 
@@ -373,9 +373,7 @@ fn print_table(title: Option<&str>, headers: &[&str], rows: &[Vec<String>]) {
     const FIXED_MAX: usize = 22;
     let fixed_total: usize = nat.iter().map(|&w| if w <= FIXED_MAX { w } else { 0 }).sum();
     let flex_count = nat.iter().filter(|&&w| w > FIXED_MAX).count();
-    let flex_budget = if flex_count > 0 {
-        budget.saturating_sub(fixed_total) / flex_count
-    } else { 0 };
+    let flex_budget = budget.saturating_sub(fixed_total).checked_div(flex_count).unwrap_or(0);
 
     let mut widths: Vec<usize> = (0..n).map(|i| {
         let natural = nat[i];
