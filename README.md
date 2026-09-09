@@ -105,7 +105,27 @@ dwn list --pattern "*.zip"    # Glob match: only ZIP files
 dwn list -z                   # Inspect the newest archive
 dwn list -z -f myfile.tar.gz  # Inspect a specific archive
 dwn list -z -p png            # Inspect contents, filtered to entries containing "png"
+dwn list -z -p xmap           # No -f given: picks the newest archive named *xmap*
+                               # and shows its full contents (see below)
 ```
+
+**Archive auto-selection with `-z` (and `extract`):** if you don't pass `-f`,
+`--pattern` is first tried against **archive filenames** in Downloads — the
+newest archive whose name matches is opened. Only if no archive filename
+matches does the pattern fall back to filtering the *contents* of the
+newest archive overall (the original behavior). This means `-p` does double
+duty depending on whether `-f` is given:
+
+- No `-f`: `-p` picks *which archive* to open (falls back to content
+  filtering only if no archive name matches).
+- With `-f`: `-p` filters the *contents* of that specific archive, as
+  documented above — filename matching doesn't apply since you've already
+  named the file.
+
+If an archive was selected by filename match and none of its internal
+entries also happen to match the same pattern, the full listing (or, for
+`extract`, the full contents) is shown/extracted rather than erroring —
+the pattern already did its job picking the archive.
 
 ---
 
@@ -127,7 +147,8 @@ and its basename, so both `-p png` (substring) and `-p "assets/*"` (glob)
 work as expected — see the matching rules under `dwn list` above; they're
 identical here. Conflict detection (existing vs. new files) and the
 interactive overwrite prompt are both computed only over the entries that
-match the pattern.
+match the pattern. See "Archive auto-selection" above — the same rule
+applies here when `-f` is omitted.
 
 **Smart conflict logic:**
 
@@ -214,6 +235,20 @@ All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallb
 ---
 
 ## Changelog
+
+### v1.0.6
+
+- **Fixed:** `list -z -p PATTERN` (and `extract -p PATTERN`) without `-f`
+  always opened the newest archive **overall**, then searched *inside* it
+  for the pattern — so `dwn list -z -p xmap` would fail with "No entries
+  match pattern" unless the newest archive in Downloads happened to be about
+  xmap, even when an archive literally named `xmaps_with_bmkg.zip` existed.
+  Auto-selection now tries the pattern against archive **filenames** first
+  and opens the newest match; it only falls back to "newest archive overall,
+  filter its contents" if no archive filename matches. If an archive is
+  selected by filename and none of its internal entries also match, the
+  whole archive is shown/extracted rather than erroring, since the pattern
+  already did its job picking the file.
 
 ### v1.0.5
 

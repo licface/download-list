@@ -70,6 +70,7 @@ const E_DOC:      &str = "📋";
       dwn list -p \"*.zip\"         Exact glob match (already has a wildcard)\n  \
       dwn list -z                 Inspect contents of the newest archive\n  \
       dwn list -z -f foo.7z       Inspect a specific archive\n  \
+      dwn list -z -p xmap         No -f: opens the newest archive named *xmap*\n  \
       dwn extract                 Extract the newest archive\n  \
       dwn extract -f foo.zip      Extract a specific archive\n  \
       dwn extract -p \"*.txt\"      Extract only files matching a pattern\n  \
@@ -479,14 +480,30 @@ fn cmd_list(last: bool, pattern: &str, asc: bool) {
 }
 
 fn cmd_list_archive(file: Option<PathBuf>, pattern: &str, verbose: bool) {
-    let path = match resolve_archive(file, verbose) { Some(p)=>p, None=>process::exit(1) };
+    let (path, matched_by_name) = match resolve_archive(file, pattern, verbose) { Some(p)=>p, None=>process::exit(1) };
     vlog(verbose, "INFO", &format!("{E_SEARCH} Inspecting: {}", path.display()));
 
     let all_entries = match read_archive_entries(&path) {
         Ok(e) => e,
         Err(e) => { eprintln!("{E_ERROR} {}", color::red(&format!("Cannot read archive: {e}"))); process::exit(1); }
     };
-    let entries: Vec<ArchiveEntry> = all_entries.into_iter().filter(|e| entry_matches(pattern, &e.name)).collect();
+    if all_entries.is_empty() {
+        eprintln!("{E_WARNING} {}", color::yellow("Archive is empty"));
+        process::exit(1);
+    }
+
+    let filtered: Vec<ArchiveEntry> = all_entries.iter().filter(|e| entry_matches(pattern, &e.name)).cloned().collect();
+    // If the pattern already did its job picking *which archive* to open
+    // (no -f given), don't also demand it match something *inside* that
+    // archive — show everything. Only treat an empty content-filter as an
+    // error when the pattern was the sole basis for filtering (i.e. -f was
+    // given, or no archive filename matched it).
+    let entries: Vec<ArchiveEntry> = if filtered.is_empty() && matched_by_name {
+        vlog(verbose, "INFO", &format!("Pattern '{pattern}' matched the archive itself; showing all {} entries", all_entries.len()));
+        all_entries
+    } else {
+        filtered
+    };
     if entries.is_empty() {
         eprintln!("{E_WARNING} {}", color::yellow(&format!("No entries match pattern '{pattern}'")));
         process::exit(1);
@@ -528,7 +545,7 @@ fn cmd_list_archive(file: Option<PathBuf>, pattern: &str, verbose: bool) {
 enum Mode { OverwriteAll, AllNew, OnlyNew, AllExist }
 
 fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, pattern: &str, verbose: bool) {
-    let path = match resolve_archive(file, verbose) { Some(p)=>p, None=>process::exit(1) };
+    let (path, matched_by_name) = match resolve_archive(file, pattern, verbose) { Some(p)=>p, None=>process::exit(1) };
 
     let file_size = match fs::metadata(&path) {
         Ok(m) => m.len(),
@@ -554,7 +571,16 @@ fn cmd_extract(file: Option<PathBuf>, output: PathBuf, overwrite: bool, pattern:
 
     // Apply the entry-name filter (if any) before doing anything else, so
     // counts, conflict detection, and the extraction itself all agree.
-    let entries: Vec<ArchiveEntry> = all_entries.into_iter().filter(|e| entry_matches(pattern, &e.name)).collect();
+    let filtered: Vec<ArchiveEntry> = all_entries.iter().filter(|e| entry_matches(pattern, &e.name)).cloned().collect();
+    // If the pattern already did its job picking *which archive* to open
+    // (no -f given), don't also demand it match something *inside* that
+    // archive before extracting anything — extract everything from it.
+    let entries: Vec<ArchiveEntry> = if filtered.is_empty() && matched_by_name {
+        vlog(verbose, "INFO", &format!("Pattern '{pattern}' matched the archive itself; extracting all {} entries", all_entries.len()));
+        all_entries
+    } else {
+        filtered
+    };
     if entries.is_empty() {
         eprintln!("{E_WARNING} {}", color::yellow(&format!("No entries match pattern '{pattern}'")));
         process::exit(1);
@@ -932,9 +958,19 @@ fn extract_rar(path: &Path, output: &Path, mode: Mode, pattern: &str) -> Result<
 }
 
 // ── Resolve archive from args or auto-detect ──────────────────────────────────
-fn resolve_archive(file: Option<PathBuf>, verbose: bool) -> Option<PathBuf> {
+/// Resolve which archive to operate on. If `file` is given, use it. Otherwise
+/// auto-detect: if `pattern` isn't the default `*`, first try to find the
+/// newest archive whose *filename* matches it — that's what people mean by
+/// `dwn list -z -p xmap` when they haven't said `-f`: "find the archive
+/// named like xmap and show me what's in it," not "open whatever the newest
+/// archive happens to be and search its contents for xmap." Only fall back
+/// to "just the newest archive overall" if no filename matches.
+/// Returns `(path, matched_by_filename)` so callers know whether the
+/// pattern already did its job picking the archive (in which case an empty
+/// content-filter result shouldn't be treated as an error).
+fn resolve_archive(file: Option<PathBuf>, pattern: &str, verbose: bool) -> Option<(PathBuf, bool)> {
     if let Some(p) = file {
-        if p.exists() { return Some(p); }
+        if p.exists() { return Some((p, false)); }
         eprintln!("{E_ERROR} {}", color::red(&format!("File not found: {}", p.display())));
         return None;
     }
@@ -944,9 +980,21 @@ fn resolve_archive(file: Option<PathBuf>, verbose: bool) -> Option<PathBuf> {
         eprintln!("{E_ERROR} {}", color::red("No archive files found in Downloads"));
         return None;
     }
+
+    if pattern != "*" && !pattern.is_empty() {
+        if let Some(m) = archives.iter().find(|f| {
+            let name = f.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            entry_matches(pattern, name)
+        }) {
+            let name = m.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            vlog(verbose, "INFO", &format!("Using archive matching '{pattern}': {name}"));
+            return Some((m.path.clone(), true));
+        }
+    }
+
     let name = archives[0].path.file_name().unwrap_or_default().to_string_lossy().to_string();
     vlog(verbose, "INFO", &format!("Using newest archive: {name}"));
-    Some(archives[0].path.clone())
+    Some((archives[0].path.clone(), false))
 }
 
 // ── Verbose logger ────────────────────────────────────────────────────────────
