@@ -78,20 +78,33 @@ dwn list [OPTIONS]
 
 Options:
   -l, --last            Show only the single newest file
-  -p, --pattern <PAT>   Glob filter (default: *)
+  -p, --pattern <PAT>   Filter (default: *) — see matching rules below
   -z, --list-archive    Inspect archive contents (like `7z l`)
   -f, --file <FILE>     Archive to inspect (used with -z)
   -v, --verbose         Verbose output
+      --asc             Sort oldest-first (default)
+      --desc            Sort newest-first
 ```
+
+**Sort order:** oldest-first (`--asc`) is the default. Pass `--desc` for
+newest-first.
+
+**Pattern matching:** if `--pattern` contains no `*`/`?`, it's treated as a
+substring search — `-p xmap` matches `xmaps_with_bmkg.zip` anywhere the text
+`xmap` appears, not just a file literally named `xmap`. Once you include a
+wildcard, it becomes a real glob and must match the whole name — `-p "*.zip"`
+matches anything ending in `.zip`.
 
 **Examples:**
 ```bash
-dwn list                      # List all files
+dwn list                      # List all files, oldest first
+dwn list --desc               # List all files, newest first
 dwn list --last               # Show only the newest file
-dwn list --pattern "*.zip"    # Show only ZIP files
+dwn list --pattern xmap       # Substring match: anything containing "xmap"
+dwn list --pattern "*.zip"    # Glob match: only ZIP files
 dwn list -z                   # Inspect the newest archive
 dwn list -z -f myfile.tar.gz  # Inspect a specific archive
-dwn list -z -p "*.png"        # Inspect contents, filtered to *.png entries
+dwn list -z -p png            # Inspect contents, filtered to entries containing "png"
 ```
 
 ---
@@ -110,10 +123,11 @@ Options:
 ```
 
 `--pattern` matches against both the entry's full path inside the archive
-and its basename, so both `-p "*.png"` and `-p "assets/*"` work as expected.
-It supports `*` and `?` wildcards, same as `list --pattern`. Conflict
-detection (existing vs. new files) and the interactive overwrite prompt are
-both computed only over the entries that match the pattern.
+and its basename, so both `-p png` (substring) and `-p "assets/*"` (glob)
+work as expected — see the matching rules under `dwn list` above; they're
+identical here. Conflict detection (existing vs. new files) and the
+interactive overwrite prompt are both computed only over the entries that
+match the pattern.
 
 **Smart conflict logic:**
 
@@ -201,7 +215,20 @@ All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallb
 
 ## Changelog
 
-### v1.1.1
+### v1.0.3
+
+- **Fixed:** `--pattern` (on `list`, `list -z`, and `extract`) demanded an
+  exact, anchored glob match — `-p xmap` returned "No files found" even
+  though files like `xmaps_with_bmkg.zip` existed, because `xmap` has no
+  `*`/`?` and so had to equal the *entire* filename. Patterns with no
+  wildcard are now treated as a substring search (`*xmap*`); patterns that
+  already contain `*`/`?` are left alone and still do a real anchored glob
+  match.
+- **Changed:** `list`'s default sort order is now oldest-first (`--asc`,
+  matching the flag's own description, which already said "this is the
+  default" while the code did the opposite). Pass `--desc` for newest-first.
+
+### v1.1.0
 
 - **Fixed:** `extract` had no way to select which files to pull out of an
   archive — the underlying plumbing existed (an unused parameter) but was
