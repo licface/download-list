@@ -688,13 +688,40 @@ fn entry_matches(pattern: &str, name: &str) -> bool {
 /// Safely join an archive entry name onto the output directory, rejecting
 /// absolute paths and `..` components ("zip-slip") that would otherwise let
 /// a crafted archive write outside the extraction target.
+/// Windows forbids `< > : " | ? *` and control characters in filenames, and
+/// disallows a component that's empty or ends in a dot/space. Archives built
+/// on Linux/macOS can legally contain such names — some tools even embed
+/// synthetic entries like Python's `<frozen importlib>` debug names — which
+/// then fail to extract on Windows with a cryptic OS error (123) instead of
+/// just... not being valid there. Sanitise so extraction can proceed.
+#[cfg(windows)]
+fn sanitize_component(name: &str) -> std::borrow::Cow<'_, str> {
+    const RESERVED: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+    let needs_fix = name.is_empty()
+        || name.chars().any(|c| RESERVED.contains(&c) || (c as u32) < 32)
+        || name.ends_with('.') || name.ends_with(' ');
+    if !needs_fix { return std::borrow::Cow::Borrowed(name); }
+    let mut s: String = name.chars()
+        .map(|c| if RESERVED.contains(&c) || (c as u32) < 32 { '_' } else { c })
+        .collect();
+    while s.ends_with('.') || s.ends_with(' ') { s.pop(); }
+    if s.is_empty() { s.push('_'); }
+    std::borrow::Cow::Owned(s)
+}
+#[cfg(not(windows))]
+fn sanitize_component(name: &str) -> std::borrow::Cow<'_, str> { std::borrow::Cow::Borrowed(name) }
+
 fn safe_join(output: &Path, name: &str) -> Option<PathBuf> {
     let norm = name.replace('\\', "/");
     let mut result = output.to_path_buf();
     let mut any = false;
     for comp in Path::new(&norm).components() {
         match comp {
-            std::path::Component::Normal(c) => { result.push(c); any = true; }
+            std::path::Component::Normal(c) => {
+                let s = sanitize_component(&c.to_string_lossy());
+                result.push(s.as_ref());
+                any = true;
+            }
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_) => {
                 return None;
@@ -857,7 +884,10 @@ fn extract_zip(path: &Path, output: &Path, mode: Mode, pattern: &str, verbose: b
     let mut z = zip::ZipArchive::new(f).map_err(|e|e.to_string())?;
     let mut count = 0;
     for i in 0..z.len() {
-        let mut file = z.by_index(i).map_err(|e|e.to_string())?;
+        let mut file = match z.by_index(i) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping entry #{i}: {e}"))); continue; }
+        };
         if file.is_dir() { continue; }
         let name = file.name().to_string();
         if !entry_matches(pattern, &name) { continue; }
@@ -866,9 +896,23 @@ fn extract_zip(path: &Path, output: &Path, mode: Mode, pattern: &str, verbose: b
             None => { eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping unsafe path in archive: {name}"))); continue; }
         };
         if !should_write(&dest, mode) { vlog(verbose,"DEBUG",&format!("{E_SKIP} {name}")); continue; }
-        if let Some(p) = dest.parent() { fs::create_dir_all(p).map_err(|e|e.to_string())?; }
-        let mut out = fs::File::create(&dest).map_err(|e|e.to_string())?;
-        io::copy(&mut file, &mut out).map_err(|e|e.to_string())?;
+        // A single entry failing to write (invalid characters the sanitiser
+        // missed, a path too long, a permissions issue, ...) should not abort
+        // extraction of the rest of the archive — skip it and keep going.
+        if let Some(p) = dest.parent() {
+            if let Err(e) = fs::create_dir_all(p) {
+                eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping '{name}': {e}")));
+                continue;
+            }
+        }
+        let mut out = match fs::File::create(&dest) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping '{name}': {e}"))); continue; }
+        };
+        if let Err(e) = io::copy(&mut file, &mut out) {
+            eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping '{name}': {e}")));
+            continue;
+        }
         vlog(verbose,"DEBUG",&format!("{E_NEW} {name}"));
         count += 1;
     }
@@ -881,20 +925,40 @@ fn extract_tar(path: &Path, output: &Path, mode: Mode, comp: char, pattern: &str
     macro_rules! do_extract {
         ($rd:expr) => {{
             let mut arc = tar::Archive::new($rd);
-            for entry in arc.entries().map_err(|e|e.to_string())? {
-                let mut entry = entry.map_err(|e|e.to_string())?;
+            let entries = arc.entries().map_err(|e|e.to_string())?;
+            for entry in entries {
+                let mut entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping a tar entry: {e}"))); continue; }
+                };
                 if !entry.header().entry_type().is_file() { continue; }
-                let name = entry.path().map_err(|e|e.to_string())?.to_string_lossy().into_owned();
+                let name = match entry.path() {
+                    Ok(p) => p.to_string_lossy().into_owned(),
+                    Err(e) => { eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping a tar entry: {e}"))); continue; }
+                };
                 if !entry_matches(pattern, &name) { continue; }
                 let dest = match safe_join(output, &name) {
                     Some(d) => d,
                     None => { eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping unsafe path in archive: {name}"))); continue; }
                 };
                 if !should_write(&dest, mode) { vlog(verbose,"DEBUG",&format!("{E_SKIP} {name}")); continue; }
-                if let Some(p) = dest.parent() { fs::create_dir_all(p).map_err(|e|e.to_string())?; }
+                // Same principle as extract_zip: one bad entry shouldn't
+                // abort extraction of the rest of the archive.
+                if let Some(p) = dest.parent() {
+                    if let Err(e) = fs::create_dir_all(p) {
+                        eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping '{name}': {e}")));
+                        continue;
+                    }
+                }
                 let mut buf = Vec::new();
-                entry.read_to_end(&mut buf).map_err(|e|e.to_string())?;
-                fs::write(&dest, &buf).map_err(|e|e.to_string())?;
+                if let Err(e) = entry.read_to_end(&mut buf) {
+                    eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping '{name}': {e}")));
+                    continue;
+                }
+                if let Err(e) = fs::write(&dest, &buf) {
+                    eprintln!("{E_WARNING} {}", color::yellow(&format!("Skipping '{name}': {e}")));
+                    continue;
+                }
                 vlog(verbose,"DEBUG",&format!("{E_NEW} {name}"));
                 count += 1;
             }

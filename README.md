@@ -236,6 +236,23 @@ All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallb
 
 ## Changelog
 
+### v1.0.8
+
+- **Fixed (critical):** extraction of an entire archive would abort with a
+  raw OS error and extract **zero files** if even one entry's name used a
+  character that's illegal on Windows (`< > : " | ? *`) — legal on the
+  Linux/macOS system that built the archive, but not on Windows. Some tools
+  even embed synthetic debug-only entries like Python's `<frozen
+  importlib>` that trigger this. Two independent fixes:
+  - Path components are now sanitised on Windows (illegal characters
+    replaced, trailing dots/spaces trimmed) so these entries extract
+    successfully instead of failing outright.
+  - Belt and suspenders: a single entry that still fails to write for any
+    reason (odd permissions, a path that's too long, etc.) is now skipped
+    with a warning instead of aborting extraction of the rest of the
+    archive. Previously one bad entry meant *nothing* got extracted, even
+    when the other 99% of the archive was perfectly fine.
+
 ### v1.0.7
 
 - **Fixed (critical):** `extract -p PATTERN` without `-f`, when the pattern
