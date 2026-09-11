@@ -180,6 +180,41 @@ dwn path   # Prints the Downloads directory path
 
 ---
 
+### `dwn move`
+
+```
+dwn move [OPTIONS]
+
+Options:
+  -l, --last            Only move the single newest matching file
+  -p, --pattern <PAT>   Filter which files to move (default: *) — same
+                         matching rules as `list --pattern`
+  -f, --file <FILE>     Move one specific file instead of picking from Downloads
+  -d, --dest <DIR>      Destination directory (default: current directory)
+  -w, --overwrite       Overwrite files that already exist at the destination
+  -v, --verbose         Show per-file progress
+```
+
+With no `-l`/`-p`/`-f`, `move` targets **every file** in Downloads — since
+that's a big, hard-to-undo action, it asks for confirmation first (in a
+non-interactive session it refuses instead of guessing). Narrowing with
+`--last` or a non-default `--pattern` skips the prompt.
+
+Moves use a fast rename when the destination is on the same drive/filesystem,
+and transparently fall back to copy-then-delete when it isn't (a plain
+rename fails across drives on both Windows and Unix). Files that already
+exist at the destination are skipped unless `--overwrite` is given.
+
+**Examples:**
+```bash
+dwn move -l -d .                    # Move only the newest file, into the current dir
+dwn move -p screenshot -d ~/Pics    # Move every file with "screenshot" in the name
+dwn move -w                         # Move everything, overwriting existing files (asks first)
+dwn move -f foo.zip -d ~/Archive    # Move one specific file
+```
+
+---
+
 ## Colour Palette
 
 All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallback:
@@ -235,6 +270,31 @@ All output uses true 24-bit RGB ANSI colours — no 8-colour or 256-colour fallb
 ---
 
 ## Changelog
+
+### v1.0.10
+
+- **Added:** `dwn move` (alias `mv`) — move files out of the Downloads
+  directory. Supports `-l/--last` (newest only), `-p/--pattern` (same
+  matching rules as `list --pattern`: substring by default, real glob if
+  you include `*`/`?`), `-f/--file` (one specific file), `-d/--dest`
+  (destination directory), `-w/--overwrite`, and `-v/--verbose`. Moving
+  *everything* (no narrowing flag) asks for confirmation first, or refuses
+  outright in a non-interactive session. Uses a fast rename on the same
+  drive/filesystem and falls back to copy-then-delete across drives, since
+  a plain rename fails there on both Windows and Unix. `--overwrite`
+  explicitly removes an existing destination file first, since Windows'
+  rename (unlike POSIX) doesn't reliably replace an existing file on its own.
+
+### v1.0.9
+
+- **Fixed (build-breaking):** the v1.4.2 Windows filename sanitisation
+  introduced a compile error (`E0716: temporary value dropped while
+  borrowed`) — `sanitize_component(&c.to_string_lossy())` borrowed from a
+  `Cow<str>` temporary that was dropped at the end of the statement, then
+  used on the next line. This broke every CI build and release job on every
+  platform, not just Windows, since it's a compile error regardless of
+  target. Fixed by binding the `Cow` to a local (`let lossy = ...`) so the
+  borrow it hands out actually lives long enough to be used.
 
 ### v1.0.8
 

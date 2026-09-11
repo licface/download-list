@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "download-list"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "bzip2",
  "clap",

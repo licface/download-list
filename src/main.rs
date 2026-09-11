@@ -50,6 +50,7 @@ const E_VIDEO:    &str = "🎬";
 const E_AUDIO:    &str = "🎵";
 const E_TEXT:     &str = "📝";
 const E_DOC:      &str = "📋";
+const E_MOVE:     &str = "🚚";
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 #[derive(Parser)]
@@ -76,7 +77,10 @@ const E_DOC:      &str = "📋";
       dwn extract -p \"*.txt\"      Extract only files matching a pattern\n  \
       dwn extract --overwrite     Overwrite all existing files\n  \
       dwn extract --verbose       Show per-file details\n  \
-      dwn path                    Print the Downloads directory path",
+      dwn path                    Print the Downloads directory path\n  \
+      dwn move -l -d .            Move only the newest file here\n  \
+      dwn move -p screenshot -d ~/Pics   Move files matching a pattern\n  \
+      dwn move -w                 Move everything, overwriting existing files",
     version,
 )]
 struct Cli {
@@ -127,6 +131,28 @@ enum Commands {
     /// 📁  Show the Downloads directory path
     #[command(alias = "p")]
     Path,
+    /// 🚚  Move files out of the Downloads directory
+    #[command(alias = "mv")]
+    Move {
+        /// Only move the single newest matching file
+        #[arg(short, long)]
+        last: bool,
+        /// Filter which files to move — same matching rules as `list --pattern`
+        /// (default `*` moves everything; you'll be asked to confirm)
+        #[arg(short, long, default_value = "*")]
+        pattern: String,
+        /// Move one specific file instead of picking from Downloads
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Destination directory (default: current directory)
+        #[arg(short, long, default_value = ".")]
+        dest: PathBuf,
+        /// Overwrite files that already exist at the destination
+        #[arg(short = 'w', long)]
+        overwrite: bool,
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 // ── Archive extensions ────────────────────────────────────────────────────────
@@ -437,6 +463,121 @@ fn cmd_path() {
     println!("  {}", color::green(&downloads_dir().display().to_string()));
 }
 
+fn cmd_move(last: bool, pattern: &str, file: Option<PathBuf>, dest: PathBuf, overwrite: bool, verbose: bool) {
+    let explicit_single_file = file.is_some();
+
+    let files: Vec<PathBuf> = if let Some(f) = file {
+        if !f.exists() {
+            eprintln!("{E_ERROR} {}", color::red(&format!("File not found: {}", f.display())));
+            process::exit(1);
+        }
+        vec![f]
+    } else {
+        let matched = list_downloads(pattern); // already newest-first
+        if matched.is_empty() {
+            let msg = if pattern != "*" && !pattern.is_empty() {
+                format!("No files match pattern '{pattern}'")
+            } else {
+                "No files found".to_string()
+            };
+            println!("{E_INFO} {}", color::yellow(&msg));
+            return;
+        }
+        let mut paths: Vec<PathBuf> = matched.into_iter().map(|f| f.path).collect();
+        if last { paths.truncate(1); }
+        paths
+    };
+
+    if files.is_empty() {
+        println!("{E_INFO} {}", color::yellow("No files found"));
+        return;
+    }
+
+    // Moving *everything* with no narrowing (-l, -p, or -f) is a big,
+    // hard-to-undo action — confirm before doing it, same spirit as the
+    // overwrite-all confirmation in `extract`.
+    if !explicit_single_file && !last && pattern == "*" && files.len() > 1 {
+        if is_tty() {
+            print!("{E_WARNING} Move all {} files from Downloads to {}? [y/N] ", files.len(), dest.display());
+            io::stdout().flush().ok();
+            let mut r = String::new();
+            io::stdin().read_line(&mut r).ok();
+            if !matches!(r.trim().to_lowercase().as_str(), "y" | "yes") {
+                println!("{E_INFO} {}", color::yellow("Cancelled"));
+                return;
+            }
+        } else {
+            eprintln!("{E_WARNING} {}", color::yellow(
+                "Refusing to move all files without --last, --pattern, or --file in a non-interactive session."
+            ));
+            process::exit(1);
+        }
+    }
+
+    if let Err(e) = fs::create_dir_all(&dest) {
+        eprintln!("{E_ERROR} {}", color::red(&format!("Cannot create destination: {e}")));
+        process::exit(1);
+    }
+
+    let mut moved = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for src in &files {
+        let name = match src.file_name() { Some(n) => n, None => continue };
+        let target = dest.join(name);
+
+        if target.exists() {
+            if !overwrite {
+                vlog(verbose, "DEBUG", &format!("{E_SKIP} {} (already exists)", name.to_string_lossy()));
+                skipped += 1;
+                continue;
+            }
+            // `fs::rename` can fail outright on Windows if the destination
+            // already exists (unlike POSIX rename, which just replaces it).
+            // Remove it first so --overwrite behaves the same on every OS.
+            if let Err(e) = fs::remove_file(&target) {
+                eprintln!("{E_WARNING} {}", color::yellow(&format!("Could not overwrite '{}': {e}", name.to_string_lossy())));
+                failed += 1;
+                continue;
+            }
+        }
+
+        match move_file(src, &target) {
+            Ok(()) => {
+                vlog(verbose, "DEBUG", &format!("{E_NEW} {}", name.to_string_lossy()));
+                moved += 1;
+            }
+            Err(e) => {
+                eprintln!("{E_WARNING} {}", color::yellow(&format!("Failed to move '{}': {e}", name.to_string_lossy())));
+                failed += 1;
+            }
+        }
+    }
+
+    let mut msg = format!("Moved {moved} file{} to {}", if moved == 1 { "" } else { "s" }, dest.display());
+    if skipped > 0 { msg += &format!("  ({skipped} skipped — already exist, use --overwrite)"); }
+    if failed > 0 { msg += &format!("  ({failed} failed)"); }
+    if moved > 0 {
+        println!("{E_MOVE} {}", color::green(&msg));
+    } else {
+        println!("{E_INFO} {}", color::yellow(&msg));
+    }
+}
+
+/// Rename when possible (instant, works within the same filesystem/drive);
+/// fall back to copy-then-delete when the source and destination are on
+/// different drives/filesystems, since `fs::rename` fails across those on
+/// both Windows (`ERROR_NOT_SAME_DEVICE`) and Unix (`EXDEV`) — a plain
+/// `fs::rename` call alone would make cross-drive moves fail outright.
+fn move_file(src: &Path, dest: &Path) -> Result<(), String> {
+    if fs::rename(src, dest).is_err() {
+        fs::copy(src, dest).map_err(|e| e.to_string())?;
+        fs::remove_file(src).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn cmd_list(last: bool, pattern: &str, asc: bool) {
     let mut files = list_downloads(pattern);
     if files.is_empty() { println!("{E_INFO} {}", color::yellow("No files found")); return; }
@@ -718,7 +859,8 @@ fn safe_join(output: &Path, name: &str) -> Option<PathBuf> {
     for comp in Path::new(&norm).components() {
         match comp {
             std::path::Component::Normal(c) => {
-                let s = sanitize_component(&c.to_string_lossy());
+                let lossy = c.to_string_lossy();
+                let s = sanitize_component(&lossy);
                 result.push(s.as_ref());
                 any = true;
             }
@@ -1103,6 +1245,9 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::Path => cmd_path(),
+        Commands::Move { last, pattern, file, dest, overwrite, verbose } => {
+            cmd_move(last, &pattern, file, dest, overwrite, verbose);
+        }
         Commands::List { last, pattern, list_archive, file, verbose, asc: _, desc } => {
             // Ascending (oldest-first) is the default; `--desc` opts into
             // newest-first. `--asc` is accepted too, purely for symmetry —
